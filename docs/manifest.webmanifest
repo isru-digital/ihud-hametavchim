@@ -1,0 +1,18 @@
+{
+  "id": "/ihud-hametavchim/",
+  "name": "איחוד המתווכים",
+  "short_name": "איחוד",
+  "description": "מרכז הרעיונות של איחוד המתווכים, רשת התיווך הארצית",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "/ihud-hametavchim/",
+  "scope": "/ihud-hametavchim/",
+  "display": "standalone",
+  "theme_color": "#141B34",
+  "background_color": "#FFFFFF",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
