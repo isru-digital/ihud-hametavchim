@@ -41,6 +41,7 @@ const I = {
   check: '<svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
   zap: '<svg class="icon" viewBox="0 0 24 24"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>',
   board: '<svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/><path d="M15 3v18"/></svg>',
+  copy: '<svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   undo: '<svg class="icon" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>',
 };
 function markIcon(m) { return I[m] || ''; }
@@ -77,6 +78,9 @@ function linkify(s) {
 }
 const EXPORT_USERS = ['ITZIK'];
 function canExport() { return !!S.me && EXPORT_USERS.includes(S.me.id); }
+const ADMIN_USERS = ['ITZIK'];
+function isAdmin() { return !!S.me && ADMIN_USERS.includes(S.me.id); }
+function canDeleteMsg(m) { return !!S.me && !!m && (isAdmin() || m.user_id === S.me.id); }
 function userOf(id) { return S.users.find(u => u.id === id) || { id, name: id, color: '#888' }; }
 function topicOf(id) { return S.topics.find(t => t.id === id) || { id, name: '', color: '#888' }; }
 function initial(id) { return id ? id[0] : '?'; }
@@ -473,7 +477,7 @@ function msgHtml(m, inThread) {
 
   const filesHtml = (m.files || []).map(f => (f.mime || '').startsWith('image/')
     ? `<img class="msg-img" loading="lazy" src="${fileUrl(f.id)}" alt="${esc(f.name)}" onclick="window.open('${fileUrl(f.id)}','_blank')">`
-    : `<span class="msg-file" onclick="window.open('${fileUrl(f.id)}','_blank')">${I.file.replace('class="icon"', 'class="icon sm"')}${esc(f.name)} <small style="color:var(--ink-faint)">${fmtSize(f.size)}</small></span>`
+    : `<span class="msg-file" onclick="window.open('${fileUrl(f.id)}','_blank')">${I.file.replace('class="icon"', 'class="icon sm"')}${esc(f.name)} <small style="color:var(--ink-faint)"><bdi dir="ltr">${fmtSize(f.size)}</bdi></small></span>`
   ).join('');
 
   const tagsHtml = [];
@@ -563,8 +567,9 @@ function scrollToMsg(id) {
 
 /* תפריטים צפים */
 let menuEl = null;
+let lpSwallow = false;
 function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
-document.addEventListener('click', closeMenu);
+document.addEventListener('click', () => { if (!lpSwallow) closeMenu(); });
 function openMenu(anchor, html) {
   closeMenu();
   menuEl = document.createElement('div');
@@ -607,9 +612,14 @@ function openMoreMenu(anchor, mid) {
   if (m.mark === 'idea') items.push(`<button data-k="idea-done">${I.check}${m.task_done ? 'החזרה ללא נבדק' : 'סמן שהרעיון נבדק'}</button>`);
   items.push('<div class="sep"></div>');
   items.push(`<button data-k="pin">${I.pin}${m.pinned ? 'ביטול נעיצה' : 'נעיצה לראש הנושא'}</button>`);
+  if (m.body) items.push(`<button data-k="copy">${I.copy}העתקת טקסט</button>`);
   if (mine) {
     items.push(`<button data-k="edit">${I.edit}עריכת ההודעה</button>`);
-    items.push(`<button data-k="del" style="color:var(--danger)">${I.trash}העברה לארכיון</button>`);
+    items.push(`<button data-k="del">${I.archive}העברה לארכיון</button>`);
+  }
+  if (canDeleteMsg(m)) {
+    items.push('<div class="sep"></div>');
+    items.push(`<button data-k="hard-del" class="danger-item">${I.trash}מחק הודעה</button>`);
   }
   const el = openMenu(anchor, items.join(''));
   el.querySelectorAll('[data-k]').forEach(b => b.onclick = () => { closeMenu(); menuAction(b.dataset.k, mid); });
@@ -626,6 +636,8 @@ async function menuAction(k, mid) {
     } else if (k === 'idea-done') await patchMsg(mid, { task_done: m.task_done ? 0 : 1 });
     else if (k === 'pin') await patchMsg(mid, { pinned: m.pinned ? 0 : 1 }, true);
     else if (k === 'edit') startEdit(mid);
+    else if (k === 'copy') copyText(m.body);
+    else if (k === 'hard-del') openDeleteMessageModal(m);
     else if (k === 'del') {
       if (!confirm('להעביר את ההודעה לארכיון? היא תוסתר מהשיחה אבל לא תימחק מהמסד.')) return;
       await api(`/api/messages/${mid}`, { method: 'DELETE' });
@@ -635,6 +647,110 @@ async function menuAction(k, mid) {
       if (!$('#thread-panel').hidden) renderThreadMsgs();
     }
   } catch (e) { toast(e.message, true); }
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+    else {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    }
+    toast('הטקסט הועתק');
+  } catch (e) { toast('לא הצלחנו להעתיק', true); }
+}
+
+/* ---------- מחיקה אמיתית של הודעה ---------- */
+function openDeleteMessageModal(m) {
+  if (!canDeleteMsg(m)) return;
+  const nFiles = (m.files || []).length;
+  const notes = [];
+  if (nFiles) notes.push(nFiles === 1 ? 'הקובץ המצורף יימחק יחד איתה.' : `${nFiles} הקבצים המצורפים יימחקו יחד איתה.`);
+  if (m.thread_count) notes.push(m.thread_count === 1 ? 'התגובה בשרשור תישאר בשיחה כהודעה רגילה.' : `${m.thread_count} התגובות בשרשור יישארו בשיחה כהודעות רגילות.`);
+  if (m.reply_count) notes.push(m.reply_count === 1 ? 'הודעה אחת שמצטטת אותה תישאר, בלי הציטוט.' : `${m.reply_count} הודעות שמצטטות אותה יישארו, בלי הציטוט.`);
+  const preview = m.body ? (m.body.length > 160 ? m.body.slice(0, 160) + '…' : m.body) : '(הודעה עם קובץ מצורף)';
+  const others = m.user_id !== S.me.id;
+  openModal(`
+  <div class="modal-body">
+    <div class="modal-title danger">${I.trash}מחיקת הודעה</div>
+    <div class="confirm-quote">${esc(preview)}</div>
+    <p class="confirm-text"><b>למחוק את ההודעה לצמיתות? אי אפשר לשחזר.</b></p>
+    ${others ? `<div class="confirm-who">ההודעה נכתבה על ידי ${esc(userOf(m.user_id).name)}.</div>` : ''}
+    ${notes.length ? `<ul class="confirm-notes">${notes.map(n => `<li>${n}</li>`).join('')}</ul>` : ''}
+    <div class="modal-actions">
+      <button class="btn danger-solid" id="dm-go">מחק</button>
+      <button class="btn light" id="dm-cancel">ביטול</button>
+    </div>
+  </div>`);
+  $('#dm-cancel').onclick = closeModal;
+  $('#dm-go').onclick = async () => {
+    const btn = $('#dm-go');
+    btn.disabled = true;
+    try {
+      const d = await api(`/api/messages/${m.id}?hard=1`, { method: 'DELETE' });
+      closeModal();
+      afterMessageDeleted(m, d);
+      toast('ההודעה נמחקה לצמיתות');
+    } catch (e) { btn.disabled = false; toast(e.message, true); }
+  };
+}
+
+async function afterMessageDeleted(m, d) {
+  const inThread = S.thread.messages.some(x => x.id === m.id);
+  S.messages = S.messages.filter(x => x.id !== m.id);
+  S.thread.messages = S.thread.messages.filter(x => x.id !== m.id);
+  if (inThread) {
+    const root = S.messages.find(x => x.id === S.thread.rootId);
+    if (root) root.thread_count = Math.max(0, (root.thread_count || 1) - 1);
+    renderThreadMsgs();
+  }
+  if (S.thread.rootId === m.id) closeThread();
+  try {
+    if (d && (d.promoted || d.unquoted)) { // replies change shape on the server: reload the list
+      const fresh = await api(`/api/messages?topic_id=${S.topicId}&after=0`);
+      S.messages = fresh.messages; S.pinnedMsgs = fresh.pinned;
+    } else await loadPinnedOnly();
+  } catch (e) { /* the next poll will fix it */ }
+  renderChat(false);
+  refreshBootstrap();
+}
+
+/* ---------- מחיקת נושא שלם (ITZIK בלבד) ---------- */
+function openDeleteTopicModal(t) {
+  if (!isAdmin() || !t) return;
+  const files = t.file_count ? ` ו-${t.file_count} ${t.file_count === 1 ? 'קובץ' : 'קבצים'}` : '';
+  openModal(`
+  <div class="modal-body">
+    <div class="modal-title danger">${I.trash}מחיקת נושא לצמיתות</div>
+    <p class="confirm-text"><b>הנושא "${esc(t.name)}" יימחק יחד עם ${t.msg_count || 0} הודעות${files}. אי אפשר לשחזר.</b></p>
+    <div class="field">
+      <label for="dt-name">כדי לאשר, כתוב את שם הנושא בדיוק: <b>${esc(t.name)}</b></label>
+      <input type="text" id="dt-name" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${esc(t.name)}">
+    </div>
+    <div class="modal-actions">
+      <button class="btn danger-solid" id="dt-go" disabled>מחק נושא</button>
+      <button class="btn light" id="dt-cancel">ביטול</button>
+    </div>
+  </div>`);
+  const input = $('#dt-name'), go = $('#dt-go');
+  const match = () => input.value.trim() === t.name.trim();
+  input.addEventListener('input', () => { go.disabled = !match(); });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter' && match()) go.click(); });
+  setTimeout(() => input.focus(), 50);
+  $('#dt-cancel').onclick = closeModal;
+  go.onclick = async () => {
+    if (!match()) return;
+    go.disabled = true;
+    try {
+      await api(`/api/topics/${t.id}`, { method: 'DELETE', body: { confirm_name: input.value } });
+      closeModal();
+      if (S.route.view === 'topic' && S.topicId === t.id) location.hash = '#/';
+      await refreshBootstrap();
+      if (S.route.view === 'archive') renderArchive();
+      toast('הנושא נמחק לצמיתות');
+    } catch (e) { go.disabled = false; toast(e.message, true); }
+  };
 }
 
 async function patchMsg(mid, body, refreshPinned) {
@@ -1005,7 +1121,7 @@ function renderArchive() {
   $('#view').innerHTML = `
   <div class="content">
     <div><h1 class="display">ארכיון</h1>
-    <div class="subtitle">שום דבר לא נמחק באמת. נושא בארכיון אפשר להחזיר בלחיצה.</div></div>
+    <div class="subtitle">נושא בארכיון אפשר להחזיר בלחיצה.${isAdmin() ? ' מחיקה לצמיתות זמינה לך כאן.' : ''}</div></div>
     <div class="card">
       ${arch.length ? `<div class="feed">${arch.map(t => `
         <div class="feed-item">
@@ -1013,6 +1129,7 @@ function renderArchive() {
           <div class="txt"><div class="who">${esc(t.name)}</div></div>
           <button class="btn sm light" data-restore="${t.id}">${I.undo.replace('class="icon"', 'class="icon sm"')}החזרה</button>
           <button class="btn sm light" data-open="${t.id}">פתיחה</button>
+          ${isAdmin() ? `<button class="btn sm danger" data-deltopic="${t.id}">מחיקה</button>` : ''}
         </div>`).join('')}</div>`
       : `<div class="empty-state">${I.archive}הארכיון ריק.</div>`}
     </div>
@@ -1026,6 +1143,7 @@ function renderArchive() {
     } catch (e) { toast(e.message, true); }
   });
   $$('#view [data-open]').forEach(b => b.onclick = () => { location.hash = '#/topic/' + b.dataset.open; });
+  $$('#view [data-deltopic]').forEach(b => b.onclick = () => openDeleteTopicModal(S.topics.find(x => x.id === +b.dataset.deltopic)));
 }
 
 /* ---------- מודאלים ---------- */
@@ -1079,6 +1197,7 @@ function openTopicModal(id) {
       ${t && !t.archived ? `<button class="btn danger" id="tp-arch">${I.archive.replace('class="icon"', 'class="icon sm"')}העברה לארכיון</button>` : ''}
       <button class="btn light" id="tp-cancel">ביטול</button>
     </div>
+    ${t && isAdmin() ? `<div class="danger-zone"><div><b>מחיקת הנושא לצמיתות</b><span>כל ההודעות והקבצים שבו יימחקו. אי אפשר לשחזר.</span></div><button class="btn danger-solid" id="tp-del">מחיקה</button></div>` : ''}
   </div>`);
   let picked = color;
   $$('#modal-card .color-opt').forEach(b => b.onclick = () => {
@@ -1099,6 +1218,8 @@ function openTopicModal(id) {
       await refreshBootstrap();
     } catch (e) { toast(e.message, true); }
   };
+  const tpDel = $('#tp-del');
+  if (tpDel) tpDel.onclick = () => openDeleteTopicModal(t);
   const ar = $('#tp-arch');
   if (ar) ar.onclick = async () => {
     if (!confirm('להעביר את הנושא לארכיון? הוא לא יימחק, ואפשר להחזיר אותו מעמוד הארכיון.')) return;
@@ -1309,8 +1430,42 @@ function wireGlobal() {
     e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
   };
 
+  // לחיצה ארוכה על בועה (מגע): תפריט ההודעה
+  let lp = null;
+  const clearPress = () => { $$('.msg.pressing').forEach(x => x.classList.remove('pressing')); };
+  const endPress = () => {
+    if (!lp) return;
+    clearTimeout(lp.timer); clearPress();
+    if (lp.fired) { lpSwallow = true; setTimeout(() => { lpSwallow = false; }, 450); }
+    lp = null;
+  };
+  document.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch' || !document.documentElement.classList.contains('m')) return;
+    const bubble = e.target.closest('.bubble');
+    if (!bubble || e.target.closest('[data-act],a,img,.msg-file,.chip.clickable,.thread-link')) return;
+    const msg = bubble.closest('.msg');
+    lp = { x: e.clientX, y: e.clientY, fired: false, timer: null };
+    msg.classList.add('pressing');
+    lp.timer = setTimeout(() => {
+      if (!lp) return;
+      lp.fired = true;
+      if (navigator.vibrate) navigator.vibrate(12);
+      clearPress();
+      openMoreMenu(bubble, +msg.dataset.mid);
+    }, 480);
+  });
+  document.addEventListener('pointermove', e => {
+    if (lp && !lp.fired && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > 10) { clearTimeout(lp.timer); clearPress(); lp = null; }
+  });
+  document.addEventListener('pointerup', endPress);
+  document.addEventListener('pointercancel', endPress);
+  document.addEventListener('contextmenu', e => {
+    if (document.documentElement.classList.contains('m') && e.target.closest('.bubble')) e.preventDefault();
+  });
+
   // נייד: לחיצה על בועה פותחת את פעולות ההודעה (אין hover במגע)
   document.addEventListener('click', e => {
+    if (lpSwallow) return;
     if (!document.documentElement.classList.contains('m')) return;
     const closeActions = () => $$('.msg.actions-open').forEach(m => m.classList.remove('actions-open'));
     const bubble = e.target.closest('.bubble');

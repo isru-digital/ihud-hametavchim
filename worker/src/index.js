@@ -3,6 +3,7 @@
 
 const SALT = 'ihud-salt-7f3k';
 const EXPORT_USERS = ['ITZIK']; // only these users may export
+const ADMIN_USERS = ['ITZIK'];  // may hard-delete any message and delete whole topics
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB
 const CHUNK_B64 = 600 * 1024; // base64 chars per D1 row
 
@@ -92,11 +93,12 @@ export default {
       if (path === '/api/messages' && req.method === 'GET') return await listMessages(req, env, me, url);
       if (path === '/api/messages' && req.method === 'POST') return await postMessage(req, env, me);
       if (/^\/api\/messages\/\d+$/.test(path) && req.method === 'PATCH') return await patchMessage(req, env, me, +path.split('/').pop());
-      if (/^\/api\/messages\/\d+$/.test(path) && req.method === 'DELETE') return await deleteMessage(req, env, me, +path.split('/').pop());
+      if (/^\/api\/messages\/\d+$/.test(path) && req.method === 'DELETE') return await deleteMessage(req, env, me, +path.split('/').pop(), url);
       if (path === '/api/reactions' && req.method === 'POST') return await toggleReaction(req, env, me);
       if (path === '/api/read' && req.method === 'POST') return await markRead(req, env, me);
       if (path === '/api/topics' && req.method === 'POST') return await createTopic(req, env, me);
       if (/^\/api\/topics\/\d+$/.test(path) && req.method === 'PATCH') return await patchTopic(req, env, me, +path.split('/').pop());
+      if (/^\/api\/topics\/\d+$/.test(path) && req.method === 'DELETE') return await deleteTopic(req, env, me, +path.split('/').pop());
       if (path === '/api/board' && req.method === 'GET') return await board(req, env);
       if (path === '/api/search' && req.method === 'GET') return await search(req, env, url);
       if (path === '/api/export' && req.method === 'GET') return await exportAll(req, env, url, me);
@@ -139,7 +141,10 @@ async function bootstrap(req, env, me) {
       (SELECT COUNT(*) FROM messages m
         WHERE m.topic_id = t.id AND m.deleted = 0 AND m.user_id != ?1
           AND m.id > COALESCE((SELECT last_read_id FROM reads WHERE user_id = ?1 AND topic_id = t.id), 0)
-      ) AS unread
+      ) AS unread,
+      (SELECT COUNT(*) FROM messages m WHERE m.topic_id = t.id) AS msg_count,
+      (SELECT COUNT(*) FROM files f WHERE f.topic_id = t.id
+         OR f.message_id IN (SELECT id FROM messages WHERE topic_id = t.id)) AS file_count
     FROM topics t ORDER BY t.position, t.id
   `).bind(me.id).all()).results;
 
@@ -188,6 +193,11 @@ async function enrich(env, rows) {
      FROM messages WHERE deleted = 0 AND thread_root_id IN (${ph}) GROUP BY thread_root_id`
   ).bind(...ids).all()).results;
 
+  const quoted = (await env.DB.prepare(
+    `SELECT reply_to_id AS id, COUNT(*) AS n FROM messages
+     WHERE deleted = 0 AND reply_to_id IN (${ph}) GROUP BY reply_to_id`
+  ).bind(...ids).all()).results;
+
   const replyIds = [...new Set(rows.map(r => r.reply_to_id).filter(Boolean))];
   let replies = [];
   if (replyIds.length) {
@@ -202,6 +212,8 @@ async function enrich(env, rows) {
     const th = threads.find(x => x.root === r.id);
     r.thread_count = th ? th.n : 0;
     r.thread_users = th ? th.users.split(',') : [];
+    const q = quoted.find(x => x.id === r.id);
+    r.reply_count = q ? q.n : 0;
     if (r.reply_to_id) {
       const rp = replies.find(x => x.id === r.reply_to_id);
       r.reply_preview = rp ? { user_id: rp.user_id, body: rp.body.slice(0, 120) } : null;
@@ -243,8 +255,14 @@ async function postMessage(req, env, me) {
   let mark = b.mark || null;
 
   if (!topicId) { // רעיון מהיר בלי נושא
-    const t = await env.DB.prepare(`SELECT id FROM topics WHERE name = 'רעיונות' LIMIT 1`).first();
-    if (!t) return err(req, 'לא נמצא נושא רעיונות');
+    let t = await env.DB.prepare(`SELECT id FROM topics WHERE name = 'רעיונות' AND archived = 0 LIMIT 1`).first();
+    if (!t) {
+      const pos = await env.DB.prepare('SELECT COALESCE(MAX(position),0)+1 AS p FROM topics').first();
+      const created = await env.DB.prepare(
+        'INSERT INTO topics (name, color, created_by, created_at, position) VALUES (?,?,?,?,?)'
+      ).bind('רעיונות', '#E5C879', me.id, nowISO(), pos.p).run();
+      t = { id: created.meta.last_row_id };
+    }
     topicId = t.id;
     if (!mark) mark = 'idea';
   }
@@ -297,12 +315,61 @@ async function patchMessage(req, env, me, id) {
   return json(req, { message: row });
 }
 
-async function deleteMessage(req, env, me, id) {
-  const msg = await env.DB.prepare('SELECT user_id FROM messages WHERE id = ?').bind(id).first();
+async function deleteMessage(req, env, me, id, url) {
+  const hard = url && url.searchParams.get('hard') === '1';
+  const msg = await env.DB.prepare('SELECT id, user_id FROM messages WHERE id = ?').bind(id).first();
   if (!msg) return err(req, 'הודעה לא נמצאה', 404);
-  if (msg.user_id !== me.id) return err(req, 'אפשר להסיר רק הודעות שלך', 403);
-  await env.DB.prepare('UPDATE messages SET deleted = 1 WHERE id = ?').bind(id).run();
-  return json(req, { ok: true });
+
+  if (!hard) { // archive: hides the message, keeps the data (own messages only)
+    if (msg.user_id !== me.id) return err(req, 'אפשר להעביר לארכיון רק הודעות שלך', 403);
+    await env.DB.prepare('UPDATE messages SET deleted = 1 WHERE id = ?').bind(id).run();
+    return json(req, { ok: true });
+  }
+
+  // permanent delete: the author, or an admin
+  if (msg.user_id !== me.id && !ADMIN_USERS.includes(me.id)) return err(req, 'אפשר למחוק רק הודעות שלך', 403);
+
+  const c = await env.DB.prepare(`
+    SELECT (SELECT COUNT(*) FROM messages WHERE thread_root_id = ?1) AS thread,
+           (SELECT COUNT(*) FROM messages WHERE reply_to_id = ?1) AS quoted,
+           (SELECT COUNT(*) FROM files WHERE message_id = ?1) AS files
+  `).bind(id).first();
+
+  await env.DB.batch([
+    // replies and thread messages stay in the chat as regular messages (no orphans)
+    env.DB.prepare('UPDATE messages SET thread_root_id = NULL WHERE thread_root_id = ?').bind(id),
+    env.DB.prepare('UPDATE messages SET reply_to_id = NULL WHERE reply_to_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM file_chunks WHERE file_id IN (SELECT id FROM files WHERE message_id = ?)').bind(id),
+    env.DB.prepare('DELETE FROM files WHERE message_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM reactions WHERE message_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM messages WHERE id = ?').bind(id),
+  ]);
+  return json(req, { ok: true, hard: true, promoted: c.thread, unquoted: c.quoted, files: c.files });
+}
+
+async function deleteTopic(req, env, me, id) {
+  if (!ADMIN_USERS.includes(me.id)) return err(req, 'אין הרשאה למחוק נושא', 403);
+  const topic = await env.DB.prepare('SELECT id, name FROM topics WHERE id = ?').bind(id).first();
+  if (!topic) return err(req, 'נושא לא נמצא', 404);
+  const b = await req.json().catch(() => ({}));
+  if (String(b.confirm_name || '').trim() !== topic.name.trim()) return err(req, 'שם הנושא לא תואם, המחיקה בוטלה', 400);
+
+  const c = await env.DB.prepare(`
+    SELECT (SELECT COUNT(*) FROM messages WHERE topic_id = ?1) AS messages,
+           (SELECT COUNT(*) FROM files WHERE topic_id = ?1
+              OR message_id IN (SELECT id FROM messages WHERE topic_id = ?1)) AS files
+  `).bind(id).first();
+
+  const inTopicFiles = 'SELECT id FROM files WHERE topic_id = ?1 OR message_id IN (SELECT id FROM messages WHERE topic_id = ?1)';
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM file_chunks WHERE file_id IN (${inTopicFiles})`).bind(id),
+    env.DB.prepare('DELETE FROM files WHERE topic_id = ?1 OR message_id IN (SELECT id FROM messages WHERE topic_id = ?1)').bind(id),
+    env.DB.prepare('DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE topic_id = ?)').bind(id),
+    env.DB.prepare('DELETE FROM messages WHERE topic_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM reads WHERE topic_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM topics WHERE id = ?').bind(id),
+  ]);
+  return json(req, { ok: true, deleted_messages: c.messages, deleted_files: c.files });
 }
 
 async function toggleReaction(req, env, me) {
