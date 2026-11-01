@@ -242,6 +242,8 @@ function onRoute() {
   } else {
     S.route = { view: 'dash' }; renderDashboard();
   }
+  document.documentElement.dataset.route = S.route.view;
+  $('#back-label').textContent = S.route.view === 'topic' ? 'נושאים' : 'חזרה';
   renderSidebar();
 }
 window.addEventListener('hashchange', onRoute);
@@ -262,7 +264,9 @@ function greeting() {
 function renderDashboard() {
   if (S.route.view !== 'dash') return;
   setTitle('דשבורד');
-  const st = S.stats || { open_tasks: 0, decisions: 0, ideas: 0, files: 0 };
+  const prevScroll = ($('#view .content') || {}).scrollTop || 0;
+  const activeTopics = S.topics.filter(t => !t.archived);
+  const st =S.stats || { open_tasks: 0, decisions: 0, ideas: 0, files: 0 };
   const taskNote = S.taskByUser.filter(x => x.assignee).map(x => `${userOf(x.assignee).name}: ${x.n}`).join(' · ') || 'אין שיוכים';
   const dateStr = new Intl.DateTimeFormat('he-IL', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date());
 
@@ -271,6 +275,17 @@ function renderDashboard() {
     <div>
       <h1 class="display">${greeting()}, ${esc(S.me.name)}</h1>
       <div class="subtitle">${dateStr}</div>
+    </div>
+
+    <div class="card m-only m-topics">
+      <h2>${I.chat}נושאים<button class="more" id="m-new-topic">+ נושא חדש</button></h2>
+      ${activeTopics.map(t => `
+      <a class="topic-row" href="#/topic/${t.id}">
+        <span class="dot" style="background:${t.color}"></span>
+        <span class="nm">${esc(t.name)}</span>
+        ${t.unread ? `<span class="count">${t.unread}</span>` : ''}
+        <span class="chev">${I.back}</span>
+      </a>`).join('')}
     </div>
 
     <div class="stats">
@@ -322,6 +337,10 @@ function renderDashboard() {
     </div>` : ''}
   </div>`;
 
+  const contentEl = $('#view .content');
+  if (contentEl) contentEl.scrollTop = prevScroll;
+  const mNew = $('#m-new-topic');
+  if (mNew) mNew.onclick = e => { e.preventDefault(); openTopicModal(0); };
   $$('#view [data-go]').forEach(el => el.addEventListener('click', () => {
     location.hash = el.dataset.go;
     if (el.dataset.msg) sessionStorage.setItem('scrollToMsg', el.dataset.msg);
@@ -370,6 +389,16 @@ async function renderTopicView() {
     if (e.key === 'Escape') cancelComposerState();
   });
   $('#btn-send').onclick = sendMessage;
+  S.chatStick = true;
+  $('#chat').addEventListener('scroll', () => {
+    const c = $('#chat');
+    if (c) S.chatStick = c.scrollHeight - c.scrollTop - c.clientHeight < 80;
+  }, { passive: true });
+  input.addEventListener('focus', () => {
+    document.documentElement.classList.add('typing');
+    setTimeout(scrollChatBottom, 300);
+  });
+  input.addEventListener('blur', () => document.documentElement.classList.remove('typing'));
   $('#btn-attach').onclick = () => $('#file-input').click();
 
   S.messages = []; S.pinnedMsgs = []; S.replyTo = null; S.editing = null;
@@ -428,7 +457,7 @@ function renderChat(fullRender) {
   chat.innerHTML = html;
   wireMessages(chat);
 
-  if (fullRender || nearBottom) chat.scrollTop = chat.scrollHeight;
+  if (fullRender || nearBottom) scrollChatBottom();
 
   const want = sessionStorage.getItem('scrollToMsg');
   if (want) { sessionStorage.removeItem('scrollToMsg'); scrollToMsg(+want); }
@@ -511,6 +540,16 @@ function wireMessages(root) {
 
 function findMsg(id) {
   return S.messages.find(m => m.id === id) || S.thread.messages.find(m => m.id === id) || (S.thread.root && S.thread.root.id === id ? S.thread.root : null);
+}
+
+function scrollChatBottom() {
+  const c = $('#chat');
+  if (!c) return;
+  const go = () => { c.scrollTop = c.scrollHeight; };
+  go();
+  requestAnimationFrame(go);
+  setTimeout(go, 120);
+  c.querySelectorAll('img').forEach(i => { if (!i.complete) i.addEventListener('load', go, { once: true }); });
 }
 
 function scrollToMsg(id) {
@@ -696,7 +735,7 @@ async function sendMessage() {
       if (!S.messages.some(x => x.id === d.message.id)) S.messages.push(d.message);
       S.replyTo = null;
       renderChat(false);
-      $('#chat').scrollTop = $('#chat').scrollHeight;
+      scrollChatBottom();
     }
     input.value = ''; input.style.height = 'auto';
     renderReplyBar();
@@ -724,7 +763,7 @@ async function onChatFile(file) {
     S.replyTo = null; renderReplyBar();
     if ($('#msg-input')) { $('#msg-input').value = ''; }
     renderChat(false);
-    $('#chat').scrollTop = $('#chat').scrollHeight;
+    scrollChatBottom();
     toast('הקובץ עלה');
   } catch (e) { toast(e.message, true); }
 }
@@ -1202,6 +1241,8 @@ function renderSearchFilters() {
 async function doSearch() {
   const q = $('#search-input').value.trim();
   const f = S.searchFilters;
+  $('#search-filter-toggle').classList.toggle('active',
+    !!(f.topic_id || f.user_id || f.mark || f.from || f.to || f.has_file || f.open_tasks));
   const hasAny = q || f.topic_id || f.user_id || f.mark || f.from || f.to || f.has_file || f.open_tasks;
   const w = $('#search-results');
   if (!hasAny) {
@@ -1262,6 +1303,24 @@ function wireGlobal() {
   $('#search-box').onclick = openSearch;
   $('#btn-search-m').onclick = openSearch;
   $('#search-close').onclick = closeSearch;
+  $('#btn-back').onclick = () => { location.hash = '#/'; };
+  $('#search-filter-toggle').onclick = e => {
+    const open = $('#search-filters').classList.toggle('open');
+    e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+
+  // נייד: לחיצה על בועה פותחת את פעולות ההודעה (אין hover במגע)
+  document.addEventListener('click', e => {
+    if (!document.documentElement.classList.contains('m')) return;
+    const closeActions = () => $$('.msg.actions-open').forEach(m => m.classList.remove('actions-open'));
+    const bubble = e.target.closest('.bubble');
+    if (!bubble) { closeActions(); return; }
+    if (e.target.closest('[data-act],a,img,.msg-file,.chip.clickable,.thread-link')) return;
+    const msg = bubble.closest('.msg');
+    const wasOpen = msg.classList.contains('actions-open');
+    closeActions();
+    if (!wasOpen) msg.classList.add('actions-open');
+  });
   $('#search-input').addEventListener('input', () => {
     clearTimeout(S.searchTimer);
     S.searchTimer = setTimeout(doSearch, 280);
@@ -1289,6 +1348,30 @@ function wireGlobal() {
     if (!document.hidden && S.token && S.route.view === 'topic') loadMessages(false);
   });
 }
+
+/* ---------- גובה אמיתי של המסך (מקלדת, סרגל דפדפן) ---------- */
+(function viewportSync() {
+  const root = document.documentElement;
+  const vv = window.visualViewport;
+  let maxH = 0, lastW = 0;
+  function update() {
+    const h = Math.round(vv ? vv.height : innerHeight);
+    const w = Math.round(vv ? vv.width : innerWidth);
+    if (w !== lastW) { lastW = w; maxH = 0; }
+    maxH = Math.max(maxH, h);
+    root.style.setProperty('--app-h', h + 'px');
+    const mobile = root.classList.contains('m');
+    const kb = mobile && (maxH - h > 140);
+    const changed = kb !== root.classList.contains('kb');
+    root.classList.toggle('kb', kb);
+    if (vv && mobile) document.body.style.transform = vv.offsetTop ? `translateY(${vv.offsetTop}px)` : '';
+    if ((changed || kb) && S.chatStick !== false) requestAnimationFrame(scrollChatBottom);
+  }
+  if (vv) { vv.addEventListener('resize', update); vv.addEventListener('scroll', update); }
+  window.addEventListener('resize', update);
+  window.addEventListener('orientationchange', () => setTimeout(update, 250));
+  update();
+})();
 
 /* ---------- התחלה ---------- */
 wireGlobal();
