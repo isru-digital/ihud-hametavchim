@@ -1,0 +1,8 @@
+name = "ihud-api"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ihud-db"
+database_id = "3c21b895-971f-4148-a784-fbf146de3148"
