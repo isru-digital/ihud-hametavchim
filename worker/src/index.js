@@ -2,6 +2,7 @@
 // Cloudflare Worker + D1
 
 const SALT = 'ihud-salt-7f3k';
+const EXPORT_USERS = ['ITZIK']; // only these users may export
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB
 const CHUNK_B64 = 600 * 1024; // base64 chars per D1 row
 
@@ -98,7 +99,7 @@ export default {
       if (/^\/api\/topics\/\d+$/.test(path) && req.method === 'PATCH') return await patchTopic(req, env, me, +path.split('/').pop());
       if (path === '/api/board' && req.method === 'GET') return await board(req, env);
       if (path === '/api/search' && req.method === 'GET') return await search(req, env, url);
-      if (path === '/api/export' && req.method === 'GET') return await exportAll(req, env, url);
+      if (path === '/api/export' && req.method === 'GET') return await exportAll(req, env, url, me);
       if (path === '/api/files' && req.method === 'POST') return await uploadFile(req, env, me);
       if (path === '/api/files' && req.method === 'GET') return await listFiles(req, env);
       if (/^\/api\/files\/\d+$/.test(path) && req.method === 'GET') return await getFile(req, env, +path.split('/').pop());
@@ -469,7 +470,8 @@ async function getFile(req, env, id) {
 }
 
 // ---------- ייצוא ----------
-async function exportAll(req, env, url) {
+async function exportAll(req, env, url, me) {
+  if (!me || !EXPORT_USERS.includes(me.id)) return err(req, 'אין הרשאה לייצוא', 403);
   const format = url.searchParams.get('format') || 'md';
   const topicIds = (url.searchParams.get('topics') || '').split(',').map(Number).filter(Boolean);
   const from = url.searchParams.get('from') || '';

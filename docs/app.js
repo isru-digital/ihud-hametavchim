@@ -75,6 +75,8 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 function linkify(s) {
   return esc(s).replace(/(https?:\/\/[^\s<]+)/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
 }
+const EXPORT_USERS = ['ITZIK'];
+function canExport() { return !!S.me && EXPORT_USERS.includes(S.me.id); }
 function userOf(id) { return S.users.find(u => u.id === id) || { id, name: id, color: '#888' }; }
 function topicOf(id) { return S.topics.find(t => t.id === id) || { id, name: '', color: '#888' }; }
 function initial(id) { return id ? id[0] : '?'; }
@@ -307,6 +309,7 @@ function renderDashboard() {
       </div>
     </div>
 
+    ${canExport() ? `
     <div class="ai-export">
       <div class="txt">
         <h2>${I.sparkles}ייצוא לעוזר AI</h2>
@@ -316,15 +319,17 @@ function renderDashboard() {
         <button class="btn gold" id="btn-export-md">${I.download.replace('class="icon"', 'class="icon sm"')}קובץ מוכן ל-AI</button>
         <button class="btn ghost" id="btn-export-opts">אפשרויות ייצוא</button>
       </div>
-    </div>
+    </div>` : ''}
   </div>`;
 
   $$('#view [data-go]').forEach(el => el.addEventListener('click', () => {
     location.hash = el.dataset.go;
     if (el.dataset.msg) sessionStorage.setItem('scrollToMsg', el.dataset.msg);
   }));
-  $('#btn-export-md').onclick = () => runExport({ format: 'md' });
-  $('#btn-export-opts').onclick = openExportModal;
+  if (canExport()) {
+    $('#btn-export-md').onclick = () => runExport({ format: 'md' });
+    $('#btn-export-opts').onclick = openExportModal;
+  }
   const drop = $('#dash-drop');
   drop.onclick = () => pickLibraryFile();
   wireDrop(drop, f => uploadLibraryFile(f));
@@ -1094,6 +1099,7 @@ function openTaskModal(mid, onDone) {
 }
 
 function openExportModal() {
+  if (!canExport()) return;
   const topicChecks = S.topics.map(t =>
     `<label class="check-row"><input type="checkbox" class="exp-topic" value="${t.id}" checked> ${esc(t.name)}${t.archived ? ' (ארכיון)' : ''}</label>`).join('');
   openModal(`
@@ -1131,6 +1137,7 @@ function openExportModal() {
 }
 
 async function runExport(p) {
+  if (!canExport()) return;
   try {
     toast('מכין את הקובץ...');
     const qs = new URLSearchParams();
